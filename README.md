@@ -16,7 +16,7 @@ The frontend is served at `http://localhost:5173`; the API listens on `http://lo
 
 ### Deploy to Vercel
 
-Import the repository as a Vercel project and deploy from the repository root with the default Vite build settings (`npm run build`, output directory `dist`). The `api/[...route].ts` Node handler serves the same API routes as local Express under `/api/*`, without starting an Express listener inside the serverless function; do not set a separate frontend API URL. The function timeout is set to 30 seconds for external map-provider requests. Configure `OVERPASS_URL`, `OSRM_URL`, `NOMINATIM_URL`, and `PHOTON_URL` as Vercel environment variables only if overriding the public defaults. Redeploy after changing environment variables. A deployment that returns an HTML page from an `/api/*` URL is misconfigured; the frontend reports that clearly instead of failing with an opaque JSON parse error.
+Import the repository as a Vercel project and deploy from the repository root with the default Vite build settings (`npm run build`, output directory `dist`). The explicit `api/health.ts` and `api/geocode.ts` functions handle health checks and place search; `api/[...route].ts` serves the remaining API routes under `/api/*`. They use Node handlers without starting an Express listener inside serverless functions; do not set a separate frontend API URL. Function timeouts are configured for external provider requests. Configure `OVERPASS_URL`, `OSRM_URL`, `NOMINATIM_URL`, and `PHOTON_URL` as Vercel environment variables only if overriding the public defaults. Redeploy after changing environment variables. A deployment that returns an HTML page from an `/api/*` URL is misconfigured; the frontend reports that clearly instead of failing with an opaque JSON parse error.
 
 Vercel serverless instances are ephemeral: in-memory map caches and geocoder pacing are best-effort per instance. Use a shared cache and a production geocoding/routing provider with appropriate quotas for a public multi-user deployment. User-created connections remain in each user's browser storage.
 
@@ -29,8 +29,8 @@ The defaults in `.env.example` use public development services and do not requir
 | `PORT` | Express API port (default `3001`) |
 | `OVERPASS_URL` | Overpass interpreter endpoint for regional OSM features |
 | `OSRM_URL` | OSRM routing endpoint for actual road geometry |
-| `NOMINATIM_URL` | Nominatim geocoder endpoint |
-| `PHOTON_URL` | Fallback Photon geocoder endpoint when Nominatim is unavailable or has no result |
+| `NOMINATIM_URL` | Secondary Nominatim geocoder endpoint |
+| `PHOTON_URL` | Primary Photon geocoder endpoint |
 | `VITE_TILE_URL` | Leaflet tile URL template |
 | `VITE_TILE_ATTRIBUTION` | Attribution text for the selected tile provider |
 
@@ -48,7 +48,7 @@ Public OSM, Overpass, Nominatim, and OSRM endpoints are intended for development
 - Route optimization applies Dijkstra's algorithm, Yen's loop-free K-shortest paths, a greedy heuristic, capacity/availability/cargo filtering, and normalized weighted cost/time/distance ranking.
 - Min-cost flow accepts a batch of shipment quantities between one shared origin and destination. It uses residual capacities and minimizes per-tonne cost. It does not claim to solve multi-commodity flow across unrelated origin/destination pairs.
 - PDF reporting uses the browser's print dialog (choose “Save as PDF”).
-- Place lookup uses Nominatim first and Photon as a fallback; search results are restricted to India and can be used as saved place shortcuts.
+- Place lookup uses Photon first and Nominatim as a fallback; search results are restricted to India and can be used as saved place shortcuts.
 
 ## Production data architecture
 

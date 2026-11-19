@@ -1,5 +1,11 @@
 {
   "functions": {
+    "api/health.ts": {
+      "maxDuration": 10
+    },
+    "api/geocode.ts": {
+      "maxDuration": 30
+    },
     "api/[...route].ts": {
       "maxDuration": 30
     }
