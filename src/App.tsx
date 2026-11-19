@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, ArrowDownUp, ArrowRight, BarChart3, Boxes, CalendarClock, Check,
   CircleHelp, Clock3, Database, Download, Factory, FileText, Gauge, Layers3, LocateFixed,
@@ -16,6 +16,8 @@ import type {
   CargoType, Connection, InfrastructureFeature, InfrastructureResponse, OptimizationMetric, RouteRequest,
   RouteResult, TransportMode,
 } from "../shared/types";
+import { parseConnectionCsv } from "./connection-import";
+import { loadConnections, saveConnections } from "./connection-storage";
 
 type Page = "Overview" | "Infrastructure map" | "Route planner" | "Data manager" | "Optimization workspace" | "Route comparison" | "Reports & analytics" | "Settings";
 type Location = { id: number | string; label: string; lat: number; lon: number; type: string };
@@ -39,7 +41,6 @@ const navigation: { name: Page; icon: typeof MapIcon }[] = [
 const modeLabels: Record<TransportMode, string> = { road: "Road", rail: "Rail", air: "Air", sea: "Sea" };
 const modeColors: Record<TransportMode, string> = { road: "#3d78c5", rail: "#df9a36", air: "#8b68c1", sea: "#28a0a0" };
 const cityMapCenter: [number, number] = [22.9, 79.2];
-const storageKey = "logihelp-connections-v1";
 const plannerPreferencesKey = "logihelp-planner-preferences-v1";
 const defaultPlannerPreferences: PlannerPreferences = {
   cargoWeight: 10,
@@ -85,45 +86,42 @@ function saveRecentRoute(source: string, destination: string, mode: string) {
   ].slice(0, 20)));
 }
 
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let quoted = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    if (character === '"' && quoted && text[index + 1] === '"') {
-      field += '"';
-      index += 1;
-    } else if (character === '"') {
-      quoted = !quoted;
-    } else if (character === "," && !quoted) {
-      row.push(field); field = "";
-    } else if ((character === "\n" || character === "\r") && !quoted) {
-      if (character === "\r" && text[index + 1] === "\n") index += 1;
-      row.push(field); field = "";
-      if (row.some((cell) => cell.trim())) rows.push(row);
-      row = [];
-    } else {
-      field += character;
-    }
-  }
-  if (quoted) throw new Error("CSV contains an unclosed quoted field.");
-  row.push(field);
-  if (row.some((cell) => cell.trim())) rows.push(row);
-  return rows;
-}
-
 function useConnections() {
-  const [connections, setConnections] = useState<Connection[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem(storageKey) ?? "[]") as Connection[];
-    } catch {
-      return [];
-    }
-  });
-  useEffect(() => localStorage.setItem(storageKey, JSON.stringify(connections)), [connections]);
-  return [connections, setConnections] as const;
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [storageError, setStorageError] = useState("");
+  const [storageReady, setStorageReady] = useState(false);
+  const [storageAvailable, setStorageAvailable] = useState(false);
+  const saveQueue = useRef(Promise.resolve());
+  const lastSavedConnections = useRef<Connection[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    loadConnections().then((saved) => {
+      if (!active) return;
+      lastSavedConnections.current = saved;
+      setConnections(saved);
+      setStorageAvailable(true);
+      setStorageReady(true);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setStorageError(error instanceof Error ? error.message : "Could not load browser storage.");
+      setStorageReady(true);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!storageReady || !storageAvailable) return;
+    const snapshot = connections;
+    if (snapshot === lastSavedConnections.current) return;
+    saveQueue.current = saveQueue.current.then(() => saveConnections(snapshot)).then(() => {
+      lastSavedConnections.current = snapshot;
+      setStorageError("");
+    }).catch((error: unknown) => {
+      setStorageError(error instanceof Error ? error.message : "Could not save connections to browser storage.");
+    });
+  }, [connections, storageAvailable, storageReady]);
+  return [connections, setConnections, storageError, !storageReady] as const;
 }
 
 function readSavedLocations(key: string): Location[] {
@@ -259,11 +257,13 @@ function MapPanel({
     if (point) setMapTarget([point[1], point[0]]);
     setSelectedDetails(feature.properties);
   };
-  const visibleManualConnections = connections.filter((edge) =>
+  const manualConnectionLimit = 250;
+  const matchingManualConnections = connections.filter((edge) =>
     edge.sourceLat !== undefined && edge.sourceLon !== undefined &&
     edge.destinationLat !== undefined && edge.destinationLon !== undefined &&
     (edge.mode === "road" ? layers.roads : edge.mode === "rail" ? layers.rail : layers.facilities),
   );
+  const visibleManualConnections = matchingManualConnections.slice(0, manualConnectionLimit);
 
   return (
     <div className={`map-canvas ${expanded ? "map-canvas-expanded" : ""}`} style={{ height }}>
@@ -306,6 +306,7 @@ function MapPanel({
       {showControls && (
         <>
           <div className="map-status"><span className="status-dot" />{mapStatus}</div>
+          {matchingManualConnections.length > manualConnectionLimit && <div className="map-cap-notice">Showing {manualConnectionLimit} of {matchingManualConnections.length.toLocaleString()} saved connections. All records remain available in Data Manager.</div>}
           <div className="map-zoom-controls">
             {(["roads", "rail", "facilities"] as const).map((layer) => (
               <button key={layer} className={`layer-pill ${layers[layer] ? "active" : ""}`} onClick={() => onLayerToggle ? onLayerToggle(layer) : setLocalLayers((old) => ({ ...old, [layer]: !old[layer] }))}>
@@ -650,17 +651,22 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
   );
 }
 
-function DataManager({ connections, setConnections }: { connections: Connection[]; setConnections: (connections: Connection[]) => void }) {
+function DataManager({ connections, setConnections, storageError, storageLoading }: { connections: Connection[]; setConnections: (connections: Connection[]) => void; storageError: string; storageLoading: boolean }) {
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [selectedTransport, setSelectedTransport] = useState<TransportMode>("road");
   const [search, setSearch] = useState("");
   const [editId, setEditId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
+  const pageSize = 100;
   const blank = { source: "", destination: "", sourceLat: "", sourceLon: "", destinationLat: "", destinationLon: "", distanceKm: "", cost: "", timeHours: "", capacityTons: "", transferHours: "0", handlingCost: "0", schedule: "", cargoTypes: "", available: true };
   const [form, setForm] = useState(blank);
   const filtered = useMemo(() => connections.filter((item) =>
     item.mode === selectedTransport && `${item.source} ${item.destination} ${item.schedule ?? ""}`.toLowerCase().includes(search.toLowerCase()),
   ), [connections, search, selectedTransport]);
+  const visibleConnections = filtered.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
+  const pageCount = Math.ceil(filtered.length / pageSize);
   const reset = () => { setForm(blank); setEditId(null); };
   const save = (event: React.FormEvent) => {
     event.preventDefault();
@@ -699,18 +705,23 @@ function DataManager({ connections, setConnections }: { connections: Connection[
   };
   const importFile = async (file?: File) => {
     if (!file) return;
+    setImporting(true);
+    setNotice("Reading and validating file…");
     try {
       const isExcel = /\.(xlsx|xls)$/i.test(file.name);
-      let rows: unknown[][];
-      if (isExcel) {
-        if (/\.xls$/i.test(file.name)) throw new Error("Legacy .xls files are not supported. Save the workbook as .xlsx or CSV.");
-        const readXlsxFile = (await import("read-excel-file/browser")).default;
-        const [firstSheet] = await readXlsxFile(file);
-        if (!firstSheet) throw new Error("The spreadsheet does not contain a worksheet.");
-        rows = firstSheet.data;
-      } else {
-        rows = parseCsv(await file.text());
+      if (!isExcel) {
+        const parsed = parseConnectionCsv(await file.text(), connections);
+        setConnections([...parsed.connections, ...connections]);
+        setPageIndex(0);
+        setNotice(`Imported ${parsed.connections.length} connection${parsed.connections.length === 1 ? "" : "s"}${parsed.duplicateCount ? `; ${parsed.duplicateCount.toLocaleString()} duplicates skipped` : ""}.`);
+        return;
       }
+      let rows: unknown[][];
+      if (/\.xls$/i.test(file.name)) throw new Error("Legacy .xls files are not supported. Save the workbook as .xlsx or CSV.");
+      const readXlsxFile = (await import("read-excel-file/browser")).default;
+      const [firstSheet] = await readXlsxFile(file);
+      if (!firstSheet) throw new Error("The spreadsheet does not contain a worksheet.");
+      rows = firstSheet.data;
       if (rows.length < 2) throw new Error("CSV must include a header and at least one connection.");
       const headers = rows[0].map((value) => String(value).trim().toLowerCase());
       const index = (name: string) => headers.indexOf(name);
@@ -747,8 +758,10 @@ function DataManager({ connections, setConnections }: { connections: Connection[
         existingKeys.add(key); return true;
       });
       setConnections([...unique, ...connections]);
+      setPageIndex(0);
       setNotice(`Imported ${unique.length} connection${unique.length === 1 ? "" : "s"}${imported.length !== unique.length ? "; duplicates skipped" : ""}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : "Could not import spreadsheet."); }
+    finally { setImporting(false); }
   };
   const exportCsv = () => {
     const header = "source,destination,mode,distanceKm,cost,timeHours,capacityTons,sourceLat,sourceLon,destinationLat,destinationLon,available,cargoTypes";
@@ -759,7 +772,7 @@ function DataManager({ connections, setConnections }: { connections: Connection[
   };
   const remove = (id: string) => {
     if (!window.confirm("Delete this connection? This cannot be undone.")) return;
-    setConnections(connections.filter((item) => item.id !== id)); setNotice("Connection deleted.");
+    setConnections(connections.filter((item) => item.id !== id)); setPageIndex(0); setNotice("Connection deleted.");
   };
   return (
     <>
@@ -797,16 +810,18 @@ function DataManager({ connections, setConnections }: { connections: Connection[
                 <label className="form-field"><span>SUPPORTED CARGO TYPES <small>OPTIONAL · COMMA-SEPARATED</small></span><input value={form.cargoTypes} onChange={(event) => setForm({ ...form, cargoTypes: event.target.value })} placeholder="general, bulk" /></label>
                 <label className="form-field form-full"><span>SCHEDULE / SERVICE NOTE <small>OPTIONAL</small></span><input value={form.schedule} onChange={(event) => setForm({ ...form, schedule: event.target.value })} placeholder="Optional operator or schedule details" /></label>
               </div>
-              <div className="editor-actions"><label className="button button-secondary import-button"><Download size={15} />Import CSV / Excel<input type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={(event) => { void importFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><div>{editId && <button type="button" className="text-button" onClick={reset}>Cancel</button>}<button type="submit" className="button button-primary">{editId ? "Save changes" : "Add connection"}<ArrowRight size={15} /></button></div></div>
+              <div className="editor-actions"><label className={`button button-secondary import-button ${importing || storageLoading ? "disabled-button" : ""}`}><Download size={15} />{storageLoading ? "Loading saved data…" : importing ? "Importing…" : "Import CSV / Excel"}<input type="file" disabled={importing || storageLoading} accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" onChange={(event) => { void importFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><div>{editId && <button type="button" className="text-button" onClick={reset}>Cancel</button>}<button type="submit" className="button button-primary">{editId ? "Save changes" : "Add connection"}<ArrowRight size={15} /></button></div></div>
             </form>
+            {storageError && <div className="result-message message-warning">Browser storage error: {storageError} Imported connections may not persist until this is resolved.</div>}
             {notice && <div className="result-message">{notice}</div>}
           </section>
           <section className="panel connection-list-panel"><div className="panel-heading"><div><h2>Saved connections</h2><p>{connections.length} total across all modes</p></div><button className="icon-text-button" onClick={exportCsv} disabled={!connections.length}><Download size={14} />Export CSV</button></div>
-            <div className="connection-list-controls"><div className="search-control"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search connections" /></div><span className="connection-count">{filtered.length} {selectedTransport} records</span></div>
-            <div className="transport-tabs list-tabs">{(["road", "rail", "air", "sea"] as const).map((m) => <button key={m} className={selectedTransport === m ? "active" : ""} onClick={() => { setSelectedTransport(m); reset(); }} style={{ "--mode-color": modeColors[m] } as React.CSSProperties}>{modeLabels[m]} <span>{connections.filter((item) => item.mode === m).length}</span></button>)}</div>
-            <div className="connections-table-wrap"><table className="connections-table"><thead><tr><th>CONNECTION</th><th>DISTANCE</th><th>COST / T</th><th>CAPACITY</th><th>STATUS</th><th></th></tr></thead><tbody>{filtered.map((item) => <tr key={item.id}><td><strong>{item.source}</strong><span className="connection-destination"><ArrowRight size={12} />{item.destination}</span></td><td>{item.distanceKm.toLocaleString()} km</td><td>₹{item.cost.toLocaleString()}</td><td>{item.capacityTons} t</td><td><span className={`tag ${item.available ? "tag-green" : "tag-neutral"}`}>{item.available ? "AVAILABLE" : "OFFLINE"}</span></td><td><button className="row-action" title="Edit" onClick={() => startEdit(item)}><Settings2 size={15} /></button><button className="row-action danger-action" title="Delete" onClick={() => remove(item.id)}><X size={15} /></button></td></tr>)}</tbody></table>
+            <div className="connection-list-controls"><div className="search-control"><Search size={15} /><input value={search} onChange={(event) => { setSearch(event.target.value); setPageIndex(0); }} placeholder="Search connections" /></div><span className="connection-count">{filtered.length.toLocaleString()} {selectedTransport} records</span></div>
+            <div className="transport-tabs list-tabs">{(["road", "rail", "air", "sea"] as const).map((m) => <button key={m} className={selectedTransport === m ? "active" : ""} onClick={() => { setSelectedTransport(m); setPageIndex(0); reset(); }} style={{ "--mode-color": modeColors[m] } as React.CSSProperties}>{modeLabels[m]} <span>{connections.filter((item) => item.mode === m).length.toLocaleString()}</span></button>)}</div>
+            <div className="connections-table-wrap"><table className="connections-table"><thead><tr><th>CONNECTION</th><th>DISTANCE</th><th>COST / T</th><th>CAPACITY</th><th>STATUS</th><th></th></tr></thead><tbody>{visibleConnections.map((item) => <tr key={item.id}><td><strong>{item.source}</strong><span className="connection-destination"><ArrowRight size={12} />{item.destination}</span></td><td>{item.distanceKm.toLocaleString()} km</td><td>₹{item.cost.toLocaleString()}</td><td>{item.capacityTons} t</td><td><span className={`tag ${item.available ? "tag-green" : "tag-neutral"}`}>{item.available ? "AVAILABLE" : "OFFLINE"}</span></td><td><button className="row-action" title="Edit" onClick={() => startEdit(item)}><Settings2 size={15} /></button><button className="row-action danger-action" title="Delete" onClick={() => remove(item.id)}><X size={15} /></button></td></tr>)}</tbody></table>
               {!filtered.length && <div className="empty-list"><div className="empty-icon"><Database size={18} /></div><strong>No {selectedTransport} connections saved</strong><span>Add a connection or import a CSV to build your optimization network.</span></div>}
             </div>
+            {pageCount > 1 && <div className="connection-pagination"><span>Showing {(pageIndex * pageSize + 1).toLocaleString()}–{Math.min((pageIndex + 1) * pageSize, filtered.length).toLocaleString()} of {filtered.length.toLocaleString()}</span><div><button className="button button-secondary" disabled={pageIndex === 0} onClick={() => setPageIndex((current) => current - 1)}>Previous</button><span>Page {pageIndex + 1} of {pageCount.toLocaleString()}</span><button className="button button-secondary" disabled={pageIndex + 1 >= pageCount} onClick={() => setPageIndex((current) => current + 1)}>Next</button></div></div>}
             <div className="data-manager-footnote"><span className="manual-dot" />Manual records · Stored in this browser</div>
           </section>
         </div>
@@ -921,6 +936,10 @@ function RouteComparison({ results, connections, setPage }: { results: RouteResu
 }
 
 function Reports({ connections }: { connections: Connection[] }) {
+  const [connectionPage, setConnectionPage] = useState(0);
+  const reportPageSize = 100;
+  const reportPageCount = Math.ceil(connections.length / reportPageSize);
+  const reportConnections = connections.slice(connectionPage * reportPageSize, (connectionPage + 1) * reportPageSize);
   const modes = (["road", "rail", "air", "sea"] as const).map((mode) => ({ mode, count: connections.filter((connection) => connection.mode === mode).length }));
   const downloadReport = () => window.print();
   return (
@@ -933,7 +952,8 @@ function Reports({ connections }: { connections: Connection[] }) {
         <section className="panel report-panel"><div className="panel-heading"><div><h2>Data quality & methodology</h2><p>How to interpret this workspace</p></div></div><div className="quality-note"><span className="quality-icon"><Check size={15} /></span><div><strong>Source tracked</strong><p>Manual connections are labeled and stored locally in this browser.</p></div></div><div className="quality-note"><span className="quality-icon muted"><MapIcon size={15} /></span><div><strong>OSM features are infrastructure only</strong><p>Mapped facilities do not imply an available service, schedule or capacity.</p></div></div><div className="quality-note"><span className="quality-icon muted"><Clock3 size={15} /></span><div><strong>No invented historical metrics</strong><p>Charts and shipment volumes are not shown unless actual records are present.</p></div></div></section>
       </div>
       <section className="panel report-table-panel"><div className="panel-heading"><div><h2>Connection register</h2><p>Report-ready record inventory</p></div><button className="text-button" onClick={() => window.print()}><Download size={14} />Export PDF</button></div>
-        {!connections.length ? <div className="empty-table"><div className="empty-icon"><Factory size={18} /></div><div><strong>No connection data to report</strong><p>Add service records in Data Manager to populate transportation analysis.</p></div></div> : <div className="table-scroll"><table><thead><tr><th>SOURCE</th><th>DESTINATION</th><th>MODE</th><th>DISTANCE</th><th>COST</th><th>CAPACITY</th><th>UPDATED</th></tr></thead><tbody>{connections.map((item) => <tr key={item.id}><td>{item.source}</td><td>{item.destination}</td><td><span className="mode-badge" style={{ color: modeColors[item.mode], borderColor: `${modeColors[item.mode]}40` }}>{item.mode}</span></td><td>{item.distanceKm} km</td><td>₹{item.cost.toLocaleString()}</td><td>{item.capacityTons} t</td><td>{new Date(item.updatedAt).toLocaleDateString()}</td></tr>)}</tbody></table></div>}
+        {!connections.length ? <div className="empty-table"><div className="empty-icon"><Factory size={18} /></div><div><strong>No connection data to report</strong><p>Add service records in Data Manager to populate transportation analysis.</p></div></div> : <div className="table-scroll"><table><thead><tr><th>SOURCE</th><th>DESTINATION</th><th>MODE</th><th>DISTANCE</th><th>COST</th><th>CAPACITY</th><th>UPDATED</th></tr></thead><tbody>{reportConnections.map((item) => <tr key={item.id}><td>{item.source}</td><td>{item.destination}</td><td><span className="mode-badge" style={{ color: modeColors[item.mode], borderColor: `${modeColors[item.mode]}40` }}>{item.mode}</span></td><td>{item.distanceKm} km</td><td>₹{item.cost.toLocaleString()}</td><td>{item.capacityTons} t</td><td>{new Date(item.updatedAt).toLocaleDateString()}</td></tr>)}</tbody></table></div>}
+        {reportPageCount > 1 && <div className="connection-pagination"><span>Showing {(connectionPage * reportPageSize + 1).toLocaleString()}–{Math.min((connectionPage + 1) * reportPageSize, connections.length).toLocaleString()} of {connections.length.toLocaleString()}</span><div><button className="button button-secondary" disabled={connectionPage === 0} onClick={() => setConnectionPage((page) => page - 1)}>Previous</button><span>Page {connectionPage + 1} of {reportPageCount.toLocaleString()}</span><button className="button button-secondary" disabled={connectionPage + 1 >= reportPageCount} onClick={() => setConnectionPage((page) => page + 1)}>Next</button></div></div>}
       </section>
     </>
   );
@@ -1024,13 +1044,13 @@ function SettingsPage({ setPage }: { setPage: (page: Page) => void }) {
 export default function App() {
   const [page, setPage] = useState<Page>("Overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [connections, setConnections] = useConnections();
+  const [connections, setConnections, storageError, storageLoading] = useConnections();
   const [routeResults, setRouteResults] = useState<RouteResult[]>([]);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
   const content = page === "Overview" ? <Dashboard connections={connections} setPage={setPage} /> :
     page === "Infrastructure map" ? <InfrastructurePage setPage={setPage} connections={connections} /> :
       page === "Route planner" ? <RoutePlanner connections={connections} setPage={setPage} onCalculated={setRouteResults} /> :
-        page === "Data manager" ? <DataManager connections={connections} setConnections={setConnections} /> :
+        page === "Data manager" ? <DataManager connections={connections} setConnections={setConnections} storageError={storageError} storageLoading={storageLoading} /> :
           page === "Optimization workspace" ? <OptimizationWorkspace connections={connections} results={routeResults} setPage={setPage} /> :
             page === "Route comparison" ? <RouteComparison results={routeResults} connections={connections} setPage={setPage} /> :
               page === "Reports & analytics" ? <Reports connections={connections} /> :

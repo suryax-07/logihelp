@@ -105,6 +105,7 @@ h1 { color: var(--ink); font: 700 23px/1.25 "Manrope", sans-serif; letter-spacin
 .leaflet-map { width: 100%; height: 100%; z-index: 1; background: #e9eff1; font-family: "DM Sans", sans-serif; }
 .leaflet-control-attribution { font-size: 8px !important; }
 .map-status { position: absolute; z-index: 450; top: 12px; left: 12px; display: flex; align-items: center; gap: 7px; max-width: calc(100% - 24px); padding: 7px 9px; border: 1px solid #e4e9ed; border-radius: 4px; color: #5e6f80; background: #fffffff0; box-shadow: 0 1px 3px #15243b12; font-size: 9px; }
+.map-cap-notice { position: absolute; z-index: 450; top: 48px; left: 12px; max-width: min(330px, calc(100% - 24px)); padding: 7px 9px; border: 1px solid #e4e9ed; border-radius: 4px; color: #647587; background: #fffffff0; font-size: 8px; line-height: 1.45; }
 .status-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #3c9870; }
 .map-zoom-controls { position: absolute; z-index: 450; right: 12px; top: 12px; display: flex; align-items: center; gap: 5px; }
 .layer-pill, .map-icon-button { min-height: 29px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; border: 1px solid #e3e8ec; border-radius: 4px; color: #748193; background: #ffffffed; font-size: 8px; box-shadow: 0 1px 2px #172a3a0c; }
@@ -282,6 +283,10 @@ tbody tr:last-child td { border-bottom: 0; }
 .empty-list { min-height: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 20px; text-align: center; }
 .empty-list span { max-width: 220px; color: #909ba7; font-size: 8px; line-height: 1.5; }
 .data-manager-footnote { display: flex; align-items: center; gap: 6px; padding: 9px 14px; border-top: 1px solid #edf0f3; color: #8b97a4; font-size: 8px; }
+.connection-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-top: 1px solid #edf0f3; color: #7d8b99; font-size: 8px; }
+.connection-pagination > div { display: flex; align-items: center; gap: 9px; }
+.connection-pagination .button { min-height: 29px; padding: 0 9px; font-size: 8px; }
+.disabled-button { opacity: .6; pointer-events: none; }
 .manual-dot { width: 6px; height: 6px; border-radius: 50%; background: #5797c4; }
 
 .workspace-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, .75fr); gap: 14px; align-items: start; }
@@ -456,6 +461,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .panel-heading { padding-right: 12px; padding-left: 12px; }
   .map-zoom-controls { right: 7px; top: auto; bottom: 10px; flex-wrap: wrap; justify-content: flex-end; max-width: 75%; }
   .map-status { top: 8px; left: 8px; }
+  .map-cap-notice { top: 42px; left: 8px; }
   .map-toolbar { align-items: flex-start; flex-direction: column; }
   .map-toolbar-note { padding-left: 3px; }
   .map-canvas-expanded { min-height: 64vh !important; }
@@ -493,6 +499,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .settings-actions { padding-right: 12px; padding-left: 12px; }
   .settings-actions .button { padding: 0 8px; }
   .reports-stats .stat-card { min-height: 84px; }
+  .connection-pagination { align-items: flex-start; flex-direction: column; }
+  .connection-pagination > div { width: 100%; justify-content: space-between; }
   .alternative-row { gap: 8px; padding-right: 9px; padding-left: 9px; }
   .alternative-metrics { min-width: 76px; }
   .route-score { min-width: 27px; }

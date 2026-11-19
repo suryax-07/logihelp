@@ -43,8 +43,9 @@ Public OSM, Overpass, Nominatim, and OSRM endpoints are intended for development
 - Airports and ports are not connected into invented flight or shipping services. Multi-modal optimization uses only manual connection records saved or imported in Data Manager.
 - Manual connections require source/destination names, actual endpoint latitude/longitude, mode, distance, cost, travel time, capacity and availability. Optional supported cargo types restrict eligibility; an empty list means no extra cargo restriction was entered.
 - Connection and handling costs are interpreted as INR per tonne. Route totals multiply those values by the shipment weight. Transfer hours and handling costs are included in totals.
-- Manual data is stored in this browser's local storage; it is not synchronized to a server or shared between browsers. No sample network is seeded.
+- Manual data is stored in this browser's IndexedDB (existing local-storage records are migrated on load); it is not synchronized to a server or shared between browsers. No sample network is seeded.
 - CSV and `.xlsx` import use these required column headers: `source,destination,mode,distanceKm,cost,timeHours,capacityTons,sourceLat,sourceLon,destinationLat,destinationLon`. `available` and `cargoTypes` are optional; separate supported cargo types with `|`. CSV values containing commas or quotes may be quoted using standard CSV quoting.
+- CSV import validates and deduplicates rows as it parses, and the connection list/report render 100 records per page; map overlays are capped at 250 lines so large workspaces remain usable.
 - Route optimization applies Dijkstra's algorithm, Yen's loop-free K-shortest paths, a greedy heuristic, capacity/availability/cargo filtering, and normalized weighted cost/time/distance ranking.
 - Min-cost flow accepts a batch of shipment quantities between one shared origin and destination. It uses residual capacities and minimizes per-tonne cost. It does not claim to solve multi-commodity flow across unrelated origin/destination pairs.
 - PDF reporting uses the browser's print dialog (choose “Save as PDF”).
