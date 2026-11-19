@@ -6,6 +6,52 @@ interface SearchRoute {
   weight: number;
 }
 
+interface QueueItem {
+  node: string;
+  distance: number;
+}
+
+interface RoutePrefix {
+  children: Map<string, RoutePrefix>;
+  bannedEdges: Set<string>;
+}
+
+class MinPriorityQueue {
+  private items: QueueItem[] = [];
+
+  push(item: QueueItem) {
+    let index = this.items.push(item) - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (this.items[parent].distance <= item.distance) break;
+      this.items[index] = this.items[parent];
+      index = parent;
+    }
+    this.items[index] = item;
+  }
+
+  pop(): QueueItem | undefined {
+    if (!this.items.length) return undefined;
+    const first = this.items[0];
+    const last = this.items.pop()!;
+    if (this.items.length) {
+      let index = 0;
+      while (true) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+        if (left >= this.items.length) break;
+        const child = right < this.items.length && this.items[right].distance < this.items[left].distance
+          ? right : left;
+        if (this.items[child].distance >= last.distance) break;
+        this.items[index] = this.items[child];
+        index = child;
+      }
+      this.items[index] = last;
+    }
+    return first;
+  }
+}
+
 export interface FlowShipment {
   id: string;
   source: string;
@@ -52,26 +98,21 @@ function shortestPath(
 
   const distances = new Map<string, number>([[request.source, 0]]);
   const previous = new Map<string, { node: string; edge: Connection }>();
-  const visited = new Set<string>();
+  const queue = new MinPriorityQueue();
+  queue.push({ node: request.source, distance: 0 });
 
   while (true) {
-    let current: string | undefined;
-    let currentDistance = Infinity;
-    for (const [node, distance] of distances) {
-      if (!visited.has(node) && distance < currentDistance) {
-        current = node;
-        currentDistance = distance;
-      }
-    }
-    if (current === undefined) break;
-    if (current === request.destination) break;
-    visited.add(current);
+    const current = queue.pop();
+    if (!current) break;
+    if (current.distance !== distances.get(current.node)) continue;
+    if (current.node === request.destination) break;
 
-    for (const edge of adjacency.get(current) ?? []) {
-      const nextDistance = currentDistance + edgeWeight(edge, request.metric);
+    for (const edge of adjacency.get(current.node) ?? []) {
+      const nextDistance = current.distance + edgeWeight(edge, request.metric);
       if (nextDistance < (distances.get(edge.destination) ?? Infinity)) {
         distances.set(edge.destination, nextDistance);
-        previous.set(edge.destination, { node: current, edge });
+        previous.set(edge.destination, { node: current.node, edge });
+        queue.push({ node: edge.destination, distance: nextDistance });
       }
     }
   }
@@ -83,10 +124,12 @@ function shortestPath(
   while (node !== request.source) {
     const step = previous.get(node);
     if (!step) return undefined;
-    pathEdges.unshift(step.edge);
+    pathEdges.push(step.edge);
     node = step.node;
-    pathNodes.unshift(node);
+    pathNodes.push(node);
   }
+  pathEdges.reverse();
+  pathNodes.reverse();
   return { edges: pathEdges, nodes: pathNodes, weight: distances.get(request.destination)! };
 }
 
@@ -100,19 +143,40 @@ function yenKShortest(edges: Connection[], request: RouteRequest, limit: number)
   const accepted = [first];
   const candidates: SearchRoute[] = [];
   const candidateKeys = new Set<string>();
+  const outgoing = new Map<string, Connection[]>();
+  for (const edge of edges) {
+    const list = outgoing.get(edge.source) ?? [];
+    list.push(edge);
+    outgoing.set(edge.source, list);
+  }
 
   for (let k = 1; k < limit; k += 1) {
     const previousRoute = accepted[k - 1];
+    const rootPrefix: RoutePrefix = { children: new Map(), bannedEdges: new Set() };
+    for (const route of accepted) {
+      let prefix = rootPrefix;
+      for (let edgeIndex = 0; edgeIndex < route.edges.length; edgeIndex += 1) {
+        prefix.bannedEdges.add(route.edges[edgeIndex].id);
+        const nextNode = route.nodes[edgeIndex + 1];
+        let child = prefix.children.get(nextNode);
+        if (!child) {
+          child = { children: new Map(), bannedEdges: new Set() };
+          prefix.children.set(nextNode, child);
+        }
+        prefix = child;
+      }
+    }
+    let prefix = rootPrefix;
     for (let i = 0; i < previousRoute.nodes.length - 1; i += 1) {
+      const banned = prefix.bannedEdges;
+      const spurNode = previousRoute.nodes[i];
+      const nextPrefix = prefix.children.get(previousRoute.nodes[i + 1])!;
+      if (!(outgoing.get(spurNode) ?? []).some((edge) => !banned.has(edge.id))) {
+        prefix = nextPrefix;
+        continue;
+      }
       const rootNodes = previousRoute.nodes.slice(0, i + 1);
       const rootEdges = previousRoute.edges.slice(0, i);
-      const spurNode = rootNodes[rootNodes.length - 1];
-      const banned = new Set<string>();
-      for (const route of accepted) {
-        if (route.nodes.length > i && route.nodes.slice(0, i + 1).join("\0") === rootNodes.join("\0")) {
-          banned.add(route.edges[i].id);
-        }
-      }
       const spurRequest = { ...request, source: spurNode };
       const spur = shortestPath(edges, spurRequest, banned, new Set(rootNodes.slice(0, -1)));
       if (!spur) continue;
@@ -126,6 +190,7 @@ function yenKShortest(edges: Connection[], request: RouteRequest, limit: number)
         candidates.push(combined);
         candidateKeys.add(key);
       }
+      prefix = nextPrefix;
     }
     candidates.sort((a, b) => a.weight - b.weight);
     const next = candidates.shift();
@@ -147,13 +212,22 @@ function totals(route: SearchRoute, cargoWeight: number): Omit<RouteResult, "sco
 }
 
 function greedyPath(edges: Connection[], request: RouteRequest): SearchRoute | undefined {
+  const adjacency = new Map<string, Connection[]>();
+  for (const edge of edges) {
+    if (!eligible(edge, request)) continue;
+    const outgoing = adjacency.get(edge.source) ?? [];
+    outgoing.push(edge);
+    adjacency.set(edge.source, outgoing);
+  }
+  for (const outgoing of adjacency.values()) {
+    outgoing.sort((left, right) => edgeWeight(left, request.metric) - edgeWeight(right, request.metric));
+  }
   const nodes = [request.source];
   const path: Connection[] = [];
   const visited = new Set(nodes);
   let current = request.source;
   while (current !== request.destination && path.length <= edges.length) {
-    const next = edges.filter((edge) => edge.source === current && eligible(edge, request) && !visited.has(edge.destination))
-      .sort((a, b) => edgeWeight(a, request.metric) - edgeWeight(b, request.metric))[0];
+    const next = adjacency.get(current)?.find((edge) => !visited.has(edge.destination));
     if (!next) return undefined;
     path.push(next);
     current = next.destination;
@@ -306,38 +380,45 @@ export function optimizeFlow(connections: Connection[], shipments: FlowShipment[
   addNode(source); addNode(destination);
 
   const edgeFlow = new Map<string, number>();
+  const potentials = new Map([...graph.keys()].map((node) => [node, 0]));
   let deliveredTons = 0;
   let totalCost = 0;
   while (deliveredTons < demand - 1e-8) {
     const distances = new Map<string, number>([[source, 0]]);
     const previous = new Map<string, { from: string; edgeIndex: number }>();
-    const nodes = [...graph.keys()];
-    for (let pass = 0; pass < nodes.length - 1; pass += 1) {
-      let changed = false;
-      for (const from of nodes) {
-        const distance = distances.get(from);
-        if (distance === undefined) continue;
-        const outgoing = graph.get(from)!;
-        for (let index = 0; index < outgoing.length; index += 1) {
-          const edge = outgoing[index];
-          if (edge.capacity <= 1e-8) continue;
-          const next = distance + edge.costPerTon;
-          if (next < (distances.get(edge.to) ?? Infinity)) {
-            distances.set(edge.to, next);
-            previous.set(edge.to, { from, edgeIndex: index });
-            changed = true;
-          }
+    const queue = new MinPriorityQueue();
+    queue.push({ node: source, distance: 0 });
+    while (true) {
+      const current = queue.pop();
+      if (!current) break;
+      if (current.distance !== distances.get(current.node)) continue;
+      const outgoing = graph.get(current.node)!;
+      for (let index = 0; index < outgoing.length; index += 1) {
+        const edge = outgoing[index];
+        if (edge.capacity <= 1e-8) continue;
+        const reducedCost = edge.costPerTon +
+          (potentials.get(current.node) ?? 0) - (potentials.get(edge.to) ?? 0);
+        const next = current.distance + reducedCost;
+        if (next < (distances.get(edge.to) ?? Infinity)) {
+          distances.set(edge.to, next);
+          previous.set(edge.to, { from: current.node, edgeIndex: index });
+          queue.push({ node: edge.to, distance: next });
         }
       }
-      if (!changed) break;
     }
     if (!distances.has(destination)) break;
+    for (const [node, distance] of distances) {
+      potentials.set(node, (potentials.get(node) ?? 0) + distance);
+    }
     let amount = demand - deliveredTons;
+    let pathCost = 0;
     let node = destination;
     while (node !== source) {
       const step = previous.get(node);
       if (!step) { amount = 0; break; }
-      amount = Math.min(amount, graph.get(step.from)![step.edgeIndex].capacity);
+      const edge = graph.get(step.from)![step.edgeIndex];
+      amount = Math.min(amount, edge.capacity);
+      pathCost += edge.costPerTon;
       node = step.from;
     }
     if (amount <= 1e-8) break;
@@ -353,7 +434,7 @@ export function optimizeFlow(connections: Connection[], shipments: FlowShipment[
       node = step.from;
     }
     deliveredTons += amount;
-    totalCost += amount * distances.get(destination)!;
+    totalCost += amount * pathCost;
   }
 
   return {

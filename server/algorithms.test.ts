@@ -76,3 +76,63 @@ test("reports partial flow when total capacity is insufficient", () => {
   assert.equal(result.deliveredTons, 4);
   assert.equal(result.remainingTons, 2);
 });
+
+test("optimizes a 24,000-edge path without quadratic node scans or redundant spur searches", () => {
+  const largeNetwork = Array.from({ length: 24_000 }, (_, index): Connection => ({
+    id: `edge-${index}`,
+    source: `Hub ${index}`,
+    destination: `Hub ${index + 1}`,
+    mode: "road",
+    distanceKm: 10,
+    cost: 5,
+    timeHours: 2,
+    capacityTons: 100,
+    available: true,
+    transferHours: 0,
+    handlingCost: 0,
+    sourceType: "manual",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+
+  const result = optimizeRoutes(largeNetwork, {
+    ...request,
+    source: "Hub 0",
+    destination: "Hub 24000",
+  });
+
+  assert.equal(result.routes.length, 1);
+  assert.equal(result.routes[0].connectionIds.length, 24_000);
+  assert.equal(result.routes[0].stops[0], "Hub 0");
+  assert.equal(result.routes[0].stops.at(-1), "Hub 24000");
+});
+
+test("allocates a 24,000-edge flow path with a heap-based shortest-path search", () => {
+  const largeNetwork = Array.from({ length: 24_000 }, (_, index): Connection => ({
+    id: `flow-edge-${index}`,
+    source: `Flow hub ${index}`,
+    destination: `Flow hub ${index + 1}`,
+    mode: "road",
+    distanceKm: 10,
+    cost: 5,
+    timeHours: 2,
+    capacityTons: 100,
+    available: true,
+    transferHours: 0,
+    handlingCost: 0,
+    sourceType: "manual",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }));
+  const shipments = [{
+    id: "batch-1",
+    source: "Flow hub 0",
+    destination: "Flow hub 24000",
+    quantityTons: 2,
+  }];
+
+  const result = optimizeFlow(largeNetwork, shipments, ["road"]);
+
+  assert.equal(result.complete, true);
+  assert.equal(result.deliveredTons, 2);
+  assert.equal(result.allocations.length, 24_000);
+  assert.equal(result.totalCost, 240_000);
+});

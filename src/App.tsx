@@ -72,6 +72,21 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data;
 }
 
+function runOptimizationWorker<T>(payload: object): Promise<T> {
+  const worker = new Worker(new URL("./optimization.worker.ts", import.meta.url), { type: "module" });
+  return new Promise<T>((resolve, reject) => {
+    worker.addEventListener("message", (event: MessageEvent<{ result?: T; error?: string }>) => {
+      if (event.data.error) reject(new Error(event.data.error));
+      else if (event.data.result !== undefined) resolve(event.data.result);
+      else reject(new Error("Optimization worker returned an invalid response."));
+    }, { once: true });
+    worker.addEventListener("error", (event) => {
+      reject(new Error(event.message || "Optimization worker failed."));
+    }, { once: true });
+    worker.postMessage(payload);
+  }).finally(() => worker.terminate());
+}
+
 function saveRecentRoute(source: string, destination: string, mode: string) {
   let recent: Array<Record<string, string>> = [];
   try {
@@ -576,8 +591,8 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
     };
     setBusy(true); setRouteMessage("");
     try {
-      const data = await requestJson<{ routes: RouteResult[]; explanation: string }>("/api/optimize", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ connections, request }),
+      const data = await runOptimizationWorker<{ routes: RouteResult[]; explanation: string }>({
+        type: "routes", connections, request,
       });
       setResults(data.routes);
       onCalculated(data.routes);
@@ -832,6 +847,7 @@ function DataManager({ connections, setConnections, storageError, storageLoading
 
 function OptimizationWorkspace({ connections, results, setPage }: { connections: Connection[]; results: RouteResult[]; setPage: (page: Page) => void }) {
   const [selected, setSelected] = useState(0);
+  const [pathPage, setPathPage] = useState(0);
   const [flowQuantities, setFlowQuantities] = useState("10, 10");
   const [flowResult, setFlowResult] = useState<{
     requestedTons: number; deliveredTons: number; remainingTons: number; totalCost: number;
@@ -840,6 +856,10 @@ function OptimizationWorkspace({ connections, results, setPage }: { connections:
   const [flowError, setFlowError] = useState("");
   const [flowBusy, setFlowBusy] = useState(false);
   const route = results[selected];
+  const pathPageSize = 100;
+  const pathPageCount = route ? Math.ceil(route.connectionIds.length / pathPageSize) : 0;
+  const visiblePathEdges = route?.connectionIds.slice(pathPage * pathPageSize, (pathPage + 1) * pathPageSize) ?? [];
+  useEffect(() => setPathPage(0), [selected]);
   const edgeMap = new Map(connections.map((edge) => [edge.id, edge]));
   const runFlow = async () => {
     if (!route) return;
@@ -852,9 +872,8 @@ function OptimizationWorkspace({ connections, results, setPage }: { connections:
     }));
     setFlowBusy(true); setFlowError("");
     try {
-      const response = await requestJson<typeof flowResult>("/api/min-cost-flow", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connections, shipments, modes: route.modes }),
+      const response = await runOptimizationWorker<NonNullable<typeof flowResult>>({
+        type: "flow", connections, shipments, modes: route.modes,
       });
       setFlowResult(response);
     } catch (error) { setFlowError(error instanceof Error ? error.message : "Min-cost flow calculation failed."); }
@@ -867,12 +886,13 @@ function OptimizationWorkspace({ connections, results, setPage }: { connections:
         <div className="workspace-layout">
           <div className="workspace-main">
             <section className="panel results-panel"><div className="panel-heading"><div><h2>Ranked route alternatives</h2><p>Weighted path ranking from the saved connection graph</p></div><span className="tag tag-green">{results.length} FEASIBLE</span></div>
-              {results.map((item, index) => <button key={item.connectionIds.join("-")} className={`alternative-row ${selected === index ? "selected" : ""}`} onClick={() => setSelected(index)}>
-                <span className="alternative-rank">{String(index + 1).padStart(2, "0")}</span><span className="alternative-copy"><strong>{item.stops.join("  →  ")}</strong><small>{item.modes.map((mode) => modeLabels[mode]).join(" / ") || "No mode"} · {item.stops.length - 2} transfer{item.stops.length === 3 ? "" : "s"}</small></span><span className="alternative-metrics"><b>₹{item.cost.toLocaleString()}</b><small>{item.distanceKm.toLocaleString()} km · {item.timeHours} h</small></span><span className="route-score">{(item.score * 100).toFixed(0)}<small>score</small></span>
+              {results.map((item, index) => <button key={index} className={`alternative-row ${selected === index ? "selected" : ""}`} onClick={() => setSelected(index)}>
+                <span className="alternative-rank">{String(index + 1).padStart(2, "0")}</span><span className="alternative-copy"><strong>{item.stops.length <= 6 ? item.stops.join("  →  ") : `${item.stops.slice(0, 2).join("  →  ")}  →  … ${item.stops.length - 4} stops …  →  ${item.stops.slice(-2).join("  →  ")}`}</strong><small>{item.modes.map((mode) => modeLabels[mode]).join(" / ") || "No mode"} · {item.stops.length - 2} transfer{item.stops.length === 3 ? "" : "s"}</small></span><span className="alternative-metrics"><b>₹{item.cost.toLocaleString()}</b><small>{item.distanceKm.toLocaleString()} km · {item.timeHours} h</small></span><span className="route-score">{(item.score * 100).toFixed(0)}<small>score</small></span>
               </button>)}
             </section>
             {route && <section className="panel path-detail-panel"><div className="panel-heading"><div><h2>Selected path details</h2><p>Connection-by-connection breakdown · source data preserved</p></div><span className="tag tag-blue">ROUTE {String(selected + 1).padStart(2, "0")}</span></div>
-              <div className="path-flow">{route.connectionIds.map((id, index) => { const edge = edgeMap.get(id); return edge ? <div className="path-edge" key={id}><div className="path-node"><span className="path-node-dot" />{edge.source}</div><div className="path-link"><span className="path-link-line" style={{ borderColor: modeColors[edge.mode] }} /><span className="path-link-info"><b style={{ color: modeColors[edge.mode] }}>{modeLabels[edge.mode]}</b>{edge.distanceKm} km · ₹{(edge.cost + edge.handlingCost).toLocaleString()} · {edge.timeHours + edge.transferHours} h <small>Capacity {edge.capacityTons} t · {edge.sourceType} record</small></span></div>{index === route.connectionIds.length - 1 && <div className="path-node"><span className="path-node-dot final-dot" />{edge.destination}</div>}</div> : null; })}</div>
+              <div className="path-flow">{visiblePathEdges.map((id) => { const edge = edgeMap.get(id); return edge ? <div className="path-edge" key={id}><div className="path-node"><span className="path-node-dot" />{edge.source}</div><div className="path-link"><span className="path-link-line" style={{ borderColor: modeColors[edge.mode] }} /><span className="path-link-info"><b style={{ color: modeColors[edge.mode] }}>{modeLabels[edge.mode]}</b>{edge.distanceKm} km · ₹{(edge.cost + edge.handlingCost).toLocaleString()} · {edge.timeHours + edge.transferHours} h <small>Capacity {edge.capacityTons} t · {edge.sourceType} record</small></span></div><div className="path-node"><span className="path-node-dot final-dot" />{edge.destination}</div></div> : null; })}</div>
+              {pathPageCount > 1 && <div className="connection-pagination"><span>Showing {(pathPage * pathPageSize + 1).toLocaleString()}–{Math.min((pathPage + 1) * pathPageSize, route.connectionIds.length).toLocaleString()} of {route.connectionIds.length.toLocaleString()} route connections</span><div><button className="button button-secondary" disabled={pathPage === 0} onClick={() => setPathPage((page) => page - 1)}>Previous</button><span>Page {pathPage + 1} of {pathPageCount.toLocaleString()}</span><button className="button button-secondary" disabled={pathPage + 1 >= pathPageCount} onClick={() => setPathPage((page) => page + 1)}>Next</button></div></div>}
             </section>}
             {route && <section className="panel flow-panel"><div className="panel-heading"><div><h2>Min-cost flow · shipment batch</h2><p>Capacity-aware allocation across the selected route’s modes</p></div><span className="tag tag-blue">PER TONNE COST</span></div>
               <div className="flow-input-row"><label className="form-field"><span>SHIPMENT QUANTITIES <small>TONNES · COMMA-SEPARATED</small></span><input value={flowQuantities} onChange={(event) => setFlowQuantities(event.target.value)} placeholder="e.g. 8, 12, 4" /></label><button className="button button-primary" onClick={() => void runFlow()} disabled={flowBusy}>{flowBusy ? "Allocating…" : "Run min-cost flow"}<ArrowRight size={14} /></button></div>
@@ -920,14 +940,14 @@ function RouteComparison({ results, connections, setPage }: { results: RouteResu
       <PageTitle eyebrow="DECISION SUPPORT" title="Route comparison" description="Compare feasible alternatives side by side using consistent cost, time and distance measures." action={<><button className="button button-secondary" onClick={() => setPage("Route planner")}><Plus size={15} />New comparison</button><button className="button button-secondary" onClick={exportComparison} disabled={!results.length}><Download size={15} />Export CSV</button></>} />
       {!results.length ? <section className="panel workspace-empty"><div className="empty-icon"><ArrowDownUp size={20} /></div><h2>No alternatives to compare</h2><p>Run an optimization to generate capacity-checked route alternatives from your connection data.</p><button className="button button-primary" onClick={() => setPage("Route planner")}>Plan a route <ArrowRight size={15} /></button></section> :
         <section className="panel comparison-panel"><div className="panel-heading"><div><h2>Alternative routes</h2><p>Ranked by your selected cost, time and distance priorities</p></div><span className="tag tag-green">{results.length} FEASIBLE ROUTES</span></div>
-          <div className="comparison-table-wrap"><table className="comparison-table"><thead><tr><th>MEASURE</th>{results.map((item, index) => <th key={item.connectionIds.join("-")}><button className={`comparison-select ${selected === index ? "selected" : ""}`} onClick={() => setSelected(index)}>{index === 0 ? "PREFERRED" : `OPTION ${index + 1}`}<span>{item.stops[0]} → {item.stops[item.stops.length - 1]}</span></button></th>)}</tr></thead><tbody>
-            <tr><th>Estimated cost</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>₹{item.cost.toLocaleString()}</td>)}</tr>
-            <tr><th>Distance</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>{item.distanceKm.toLocaleString()} km</td>)}</tr>
-            <tr><th>Estimated travel time</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>{item.timeHours} hrs</td>)}</tr>
-            <tr><th>Transport modes</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>{item.modes.map((mode) => modeLabels[mode]).join(" · ")}</td>)}</tr>
-            <tr><th>Transfers</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>{Math.max(0, item.stops.length - 2)}</td>)}</tr>
-            <tr><th>Connections</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>{item.connectionIds.map((id) => names.get(id)?.mode).filter(Boolean).join(" → ")}</td>)}</tr>
-            <tr><th>Normalized score</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={item.connectionIds.join("-")}>{(item.score * 100).toFixed(0)}</td>)}</tr>
+          <div className="comparison-table-wrap"><table className="comparison-table"><thead><tr><th>MEASURE</th>{results.map((item, index) => <th key={index}><button className={`comparison-select ${selected === index ? "selected" : ""}`} onClick={() => setSelected(index)}>{index === 0 ? "PREFERRED" : `OPTION ${index + 1}`}<span>{item.stops[0]} → {item.stops[item.stops.length - 1]}</span></button></th>)}</tr></thead><tbody>
+            <tr><th>Estimated cost</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={index}>₹{item.cost.toLocaleString()}</td>)}</tr>
+            <tr><th>Distance</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={index}>{item.distanceKm.toLocaleString()} km</td>)}</tr>
+            <tr><th>Estimated travel time</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={index}>{item.timeHours} hrs</td>)}</tr>
+            <tr><th>Transport modes</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={index}>{item.modes.map((mode) => modeLabels[mode]).join(" · ")}</td>)}</tr>
+            <tr><th>Transfers</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={index}>{Math.max(0, item.stops.length - 2)}</td>)}</tr>
+            <tr><th>Connections</th>{results.map((item, index) => { const routeModes = item.connectionIds.slice(0, 50).map((id) => names.get(id)?.mode).filter(Boolean).join(" → "); return <td className={index === selected ? "highlight-cell" : ""} key={index}>{routeModes}{item.connectionIds.length > 50 ? ` … +${(item.connectionIds.length - 50).toLocaleString()} more` : ""}</td>; })}</tr>
+            <tr><th>Normalized score</th>{results.map((item, index) => <td className={index === selected ? "highlight-cell" : ""} key={index}>{(item.score * 100).toFixed(0)}</td>)}</tr>
           </tbody></table></div>
           <div className="comparison-explanation"><div className="info-icon"><Check size={15} /></div><div><strong>Preferred option is highlighted</strong><p>Scores are normalized within returned alternatives; the lowest score best matches the selected priorities. Cost, distance and time totals include transfer handling.</p></div></div>
         </section>}
