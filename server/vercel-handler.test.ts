@@ -33,6 +33,32 @@ test("the Vercel catch-all exports a working JSON API handler", async () => {
     const result = await response.json() as { routes: unknown[]; explanation: string };
     assert.deepEqual(result.routes, []);
     assert.match(result.explanation, /No available connection/);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestUrl = new URL(input instanceof Request ? input.url : input.toString());
+      if (requestUrl.hostname === "127.0.0.1") return originalFetch(input, init);
+      assert.equal(requestUrl.hostname, "photon.komoot.io");
+      return new Response(JSON.stringify({
+        features: [{
+          geometry: { coordinates: [80.28, 13.08] },
+          properties: { osm_id: 1, name: "Chennai", state: "Tamil Nadu", country: "India", osm_value: "city" },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    try {
+      const placesResponse = await fetch(`http://127.0.0.1:${address.port}/api/geocode?q=Chennai`);
+      assert.equal(placesResponse.status, 200);
+      assert.deepEqual(await placesResponse.json(), [{
+        id: "photon-1",
+        label: "Chennai, Tamil Nadu, India",
+        lon: 80.28,
+        lat: 13.08,
+        type: "city",
+      }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
