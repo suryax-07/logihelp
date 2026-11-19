@@ -44,12 +44,14 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   try {
     data = body ? JSON.parse(body) as T & { error?: string } : undefined;
   } catch {
+    const endpoint = new URL(url, window.location.origin).pathname;
     if (body.trimStart().startsWith("<")) {
       throw new Error(response.status === 404
         ? "The LogiHelp API is not deployed for this Vercel project. Redeploy from the repository root so the /api serverless function is included."
         : "The API returned a web page instead of JSON. Check the Vercel API deployment and server logs.");
     }
-    throw new Error(`The API returned an invalid response (${response.status}). Please try again.`);
+    const detail = body.trim().slice(0, 180);
+    throw new Error(`The API endpoint ${endpoint} returned a non-JSON response (${response.status})${detail ? `: ${detail}` : "."}`);
   }
   if (!data) throw new Error(`The API returned an empty response (${response.status}). Please try again.`);
   if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status}).`);
