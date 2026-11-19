@@ -174,9 +174,23 @@ tbody tr:last-child td { border-bottom: 0; }
 .swap-locations { position: absolute; z-index: 2; top: 33px; right: 27px; width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid #e2e8ed; border-radius: 4px; color: #71849a; background: #fff; }
 .inline-hint { padding: 5px 0 0 12px; color: #8190a0; font-size: 8px; }
 .suggestion-list { position: absolute; z-index: 1100; inset: 63px 0 auto 0; display: grid; overflow: hidden; border: 1px solid #e1e7ec; border-radius: 4px; background: #fff; box-shadow: 0 8px 18px #172d441a; }
-.suggestion-list button { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 0; border-bottom: 1px solid #f0f2f4; color: #637287; background: #fff; text-align: left; font-size: 9px; }
-.suggestion-list button:hover { color: #325f8e; background: #f6f9fc; }
-.suggestion-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-row { min-width: 0; display: flex; align-items: center; border-bottom: 1px solid #f0f2f4; }
+.suggestion-place { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 0; color: #637287; background: #fff; text-align: left; font-size: 9px; }
+.suggestion-place:hover { color: #325f8e; background: #f6f9fc; }
+.suggestion-place svg { flex: 0 0 auto; }
+.suggestion-place span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.favorite-toggle { width: 34px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border: 0; color: #9aa6b2; background: #fff; }
+.favorite-toggle:hover, .favorite-toggle.is-favorite { color: #c28b37; }
+.saved-places { padding: 9px 17px 0; }
+.saved-places-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.saved-places-heading > span { display: flex; align-items: center; gap: 5px; color: #798899; font-size: 8px; font-weight: 700; }
+.saved-places-heading > div { display: flex; gap: 4px; }
+.saved-places-heading button { padding: 4px 6px; border: 1px solid #e5e9ed; border-radius: 3px; color: #8290a0; background: #fff; font-size: 7px; }
+.saved-places-heading button.active { border-color: #b6cadd; color: #3e6e9a; background: #f5f9fc; }
+.saved-place-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.saved-place-chips button { max-width: 100%; display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border: 1px solid #e5e9ed; border-radius: 12px; color: #607387; background: #fbfcfd; font-size: 8px; }
+.saved-place-chips button:hover { border-color: #b7cadd; color: #3d6c98; background: #f4f8fc; }
+.saved-place-chips button svg:last-child { color: #c28b37; }
 .form-divider { height: 1px; margin: 15px 17px; background: #edf0f3; }
 .form-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px 12px; padding: 0 17px; }
 .form-field { min-width: 0; display: block; }
@@ -445,6 +459,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .route-score { min-width: 27px; }
   .map-toolbar-left { gap: 5px; }
   .flow-input-row { align-items: stretch; flex-direction: column; }
+  .saved-places { padding-right: 12px; padding-left: 12px; }
+  .saved-places-heading { align-items: flex-start; flex-direction: column; }
 }
 @media print {
   body { min-width: auto; background: #fff; }

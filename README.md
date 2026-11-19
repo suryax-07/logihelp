@@ -14,6 +14,12 @@ npm run dev
 
 The frontend is served at `http://localhost:5173`; the API listens on `http://localhost:3001`. Vite proxies `/api` requests to the backend. `npm run build` makes a production frontend build, `npm test` runs the graph algorithm tests, and `npm start` starts the API.
 
+### Deploy to Vercel
+
+Import the repository as a Vercel project and deploy from the repository root with the default Vite build settings (`npm run build`, output directory `dist`). The `api/[...route].ts` serverless function serves the same Express API under `/api/*`; do not set a separate frontend API URL. The function timeout is set to 30 seconds for external map-provider requests. Configure `OVERPASS_URL`, `OSRM_URL`, `NOMINATIM_URL`, and `PHOTON_URL` as Vercel environment variables only if overriding the public defaults. Redeploy after changing environment variables. A deployment that returns an HTML page from an `/api/*` URL is misconfigured; the frontend reports that clearly instead of failing with an opaque JSON parse error.
+
+Vercel serverless instances are ephemeral: in-memory map caches and geocoder pacing are best-effort per instance. Use a shared cache and a production geocoding/routing provider with appropriate quotas for a public multi-user deployment. User-created connections remain in each user's browser storage.
+
 ## Environment
 
 The defaults in `.env.example` use public development services and do not require API keys:
@@ -24,6 +30,7 @@ The defaults in `.env.example` use public development services and do not requir
 | `OVERPASS_URL` | Overpass interpreter endpoint for regional OSM features |
 | `OSRM_URL` | OSRM routing endpoint for actual road geometry |
 | `NOMINATIM_URL` | Nominatim geocoder endpoint |
+| `PHOTON_URL` | Fallback Photon geocoder endpoint when Nominatim is unavailable or has no result |
 | `VITE_TILE_URL` | Leaflet tile URL template |
 | `VITE_TILE_ATTRIBUTION` | Attribution text for the selected tile provider |
 
@@ -41,6 +48,7 @@ Public OSM, Overpass, Nominatim, and OSRM endpoints are intended for development
 - Route optimization applies Dijkstra's algorithm, Yen's loop-free K-shortest paths, a greedy heuristic, capacity/availability/cargo filtering, and normalized weighted cost/time/distance ranking.
 - Min-cost flow accepts a batch of shipment quantities between one shared origin and destination. It uses residual capacities and minimizes per-tonne cost. It does not claim to solve multi-commodity flow across unrelated origin/destination pairs.
 - PDF reporting uses the browser's print dialog (choose “Save as PDF”).
+- Place lookup uses Nominatim first and Photon as a fallback; search results are restricted to India and can be used as saved place shortcuts.
 
 ## Production data architecture
 

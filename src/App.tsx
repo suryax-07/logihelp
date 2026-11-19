@@ -3,7 +3,7 @@ import {
   Activity, ArrowDownUp, ArrowRight, BarChart3, Boxes, CalendarClock, Check,
   CircleHelp, Clock3, Database, Download, Factory, FileText, Gauge, Layers3, LocateFixed,
   Map as MapIcon, MapPin, Menu, Navigation, Plus, Search, Settings2, Ship, SlidersHorizontal,
-  TrainFront, Truck, X, Plane,
+  Star, TrainFront, Truck, X, Plane,
 } from "lucide-react";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -18,7 +18,7 @@ import type {
 } from "../shared/types";
 
 type Page = "Overview" | "Infrastructure map" | "Route planner" | "Data manager" | "Optimization workspace" | "Route comparison" | "Reports & analytics";
-type Location = { id: number; label: string; lat: number; lon: number; type: string };
+type Location = { id: number | string; label: string; lat: number; lon: number; type: string };
 type RouteGeometry = { coordinates: [number, number][]; distance: number; duration: number; source: string };
 
 const navigation: { name: Page; icon: typeof MapIcon }[] = [
@@ -39,9 +39,35 @@ const tileAttribution = import.meta.env.VITE_TILE_ATTRIBUTION || '&copy; <a href
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
-  const data = await response.json() as T & { error?: string };
+  const body = await response.text();
+  let data: (T & { error?: string }) | undefined;
+  try {
+    data = body ? JSON.parse(body) as T & { error?: string } : undefined;
+  } catch {
+    if (body.trimStart().startsWith("<")) {
+      throw new Error(response.status === 404
+        ? "The LogiHelp API is not deployed for this Vercel project. Redeploy from the repository root so the /api serverless function is included."
+        : "The API returned a web page instead of JSON. Check the Vercel API deployment and server logs.");
+    }
+    throw new Error(`The API returned an invalid response (${response.status}). Please try again.`);
+  }
+  if (!data) throw new Error(`The API returned an empty response (${response.status}). Please try again.`);
   if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status}).`);
   return data;
+}
+
+function saveRecentRoute(source: string, destination: string, mode: string) {
+  let recent: Array<Record<string, string>> = [];
+  try {
+    const stored = JSON.parse(localStorage.getItem("logihelp-recent-routes") ?? "[]") as unknown;
+    if (Array.isArray(stored)) recent = stored as Array<Record<string, string>>;
+  } catch {
+    recent = [];
+  }
+  localStorage.setItem("logihelp-recent-routes", JSON.stringify([
+    { source, destination, mode, updatedAt: new Date().toISOString(), status: "Calculated" },
+    ...recent,
+  ].slice(0, 20)));
 }
 
 function parseCsv(text: string): string[][] {
@@ -85,6 +111,17 @@ function useConnections() {
   return [connections, setConnections] as const;
 }
 
+function readSavedLocations(key: string): Location[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) ?? "[]") as Location[];
+    return Array.isArray(saved) ? saved.filter((location) =>
+      typeof location.label === "string" && Number.isFinite(location.lat) && Number.isFinite(location.lon),
+    ) : [];
+  } catch {
+    return [];
+  }
+}
+
 function MapBoundsListener({ onBounds }: { onBounds: (bounds: LatLngBounds) => void }) {
   const map = useMap();
   useMapEvents({
@@ -95,11 +132,17 @@ function MapBoundsListener({ onBounds }: { onBounds: (bounds: LatLngBounds) => v
   return null;
 }
 
-function Recenter({ position }: { position?: [number, number] }) {
+function Recenter({ position, source, destination }: { position?: [number, number]; source?: Location | null; destination?: Location | null }) {
   const map = useMap();
   useEffect(() => {
-    if (position) map.flyTo(position, Math.max(map.getZoom(), 8), { duration: 0.6 });
-  }, [map, position]);
+    if (source && destination) {
+      map.fitBounds([[source.lat, source.lon], [destination.lat, destination.lon]], { padding: [36, 36], maxZoom: 9, animate: true });
+    } else {
+      const target = position ?? (destination ? [destination.lat, destination.lon] as [number, number] :
+        source ? [source.lat, source.lon] as [number, number] : undefined);
+      if (target) map.flyTo(target, Math.max(map.getZoom(), 10), { duration: 0.6 });
+    }
+  }, [map, position, source, destination]);
   return null;
 }
 
@@ -193,7 +236,7 @@ function MapPanel({
           url={tileUrl}
         />
         <MapBoundsListener onBounds={updateBounds} />
-        <Recenter position={mapTarget} />
+        <Recenter position={mapTarget} source={source} destination={destination} />
         {visibleFeatures.map((feature) => {
           const category = String(feature.properties.category ?? "");
           const color = category.startsWith("Road") ? modeColors.road :
@@ -320,9 +363,10 @@ function Dashboard({ connections, setPage }: { connections: Connection[]; setPag
   const chartData = (["road", "rail", "air", "sea"] as const).map((mode) => ({
     mode: modeLabels[mode], connections: connections.filter((item) => item.mode === mode).length,
   }));
+  const today = new Date().toLocaleDateString("en-IN", { weekday: "long", day: "2-digit", month: "long", year: "numeric" }).toUpperCase();
   return (
     <>
-      <PageTitle eyebrow="TUESDAY, 03 NOVEMBER 2026" title="Operations overview" description="A clear view of your transport network and route activity." action={<button className="button button-primary" onClick={() => setPage("Route planner")}><Plus size={16} />Plan a route</button>} />
+      <PageTitle eyebrow={today} title="Operations overview" description="A clear view of your transport network and route activity." action={<button className="button button-primary" onClick={() => setPage("Route planner")}><Plus size={16} />Plan a route</button>} />
       <div className="stats-grid">
         <StatCard title="Saved connections" value={connections.length.toLocaleString()} note="User-entered records" icon={ArrowDownUp} tone="blue" />
         <StatCard title="Air facilities loaded" value={featureCounts.air === null ? "—" : featureCounts.air.toLocaleString()} note="Current map viewport · OSM" icon={Plane} tone="violet" />
@@ -389,6 +433,10 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
   const [searching, setSearching] = useState<"source" | "destination" | null>(null);
   const [suggestions, setSuggestions] = useState<Location[]>([]);
   const [suggestionFor, setSuggestionFor] = useState<"source" | "destination" | null>(null);
+  const [autocompleteTarget, setAutocompleteTarget] = useState<"source" | "destination" | null>(null);
+  const [placeTarget, setPlaceTarget] = useState<"source" | "destination">("source");
+  const [recentPlaces, setRecentPlaces] = useState<Location[]>(() => readSavedLocations("logihelp-recent-places"));
+  const [favoritePlaces, setFavoritePlaces] = useState<Location[]>(() => readSavedLocations("logihelp-favorite-places"));
   const [cargoWeight, setCargoWeight] = useState(10);
   const [cargoType, setCargoType] = useState<RouteRequest["cargoType"]>("general");
   const [maxBudget, setMaxBudget] = useState("");
@@ -401,8 +449,43 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
   const [routeMessage, setRouteMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    localStorage.setItem("logihelp-recent-places", JSON.stringify(recentPlaces));
+  }, [recentPlaces]);
+  useEffect(() => {
+    localStorage.setItem("logihelp-favorite-places", JSON.stringify(favoritePlaces));
+  }, [favoritePlaces]);
+  useEffect(() => {
+    if (!autocompleteTarget) return;
+    const query = autocompleteTarget === "source" ? sourceText.trim() : destinationText.trim();
+    if (query.length < 3) {
+      setSuggestions([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setSearching(autocompleteTarget);
+      setSuggestionFor(autocompleteTarget);
+      requestJson<Location[]>(`/api/geocode?q=${encodeURIComponent(query)}`, { signal: controller.signal })
+        .then((found) => setSuggestions(found))
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          setSuggestions([]);
+          setRouteMessage(error instanceof Error ? error.message : "Location search failed.");
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSearching(null);
+        });
+    }, 450);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [autocompleteTarget, sourceText, destinationText]);
+
   const searchLocation = async (target: "source" | "destination") => {
     const query = target === "source" ? sourceText : destinationText;
+    setAutocompleteTarget(null);
     setSearching(target);
     setSuggestionFor(target);
     setSuggestions([]);
@@ -418,8 +501,16 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
   const chooseLocation = (target: "source" | "destination", location: Location) => {
     if (target === "source") { setSource(location); setSourceText(location.label.split(",")[0]); }
     else { setDestination(location); setDestinationText(location.label.split(",")[0]); }
+    setPlaceTarget(target === "source" ? "destination" : "source");
+    setRecentPlaces((previous) => [location, ...previous.filter((place) => place.id !== location.id)].slice(0, 6));
     setSuggestions([]);
     setSuggestionFor(null);
+    setAutocompleteTarget(null);
+  };
+  const toggleFavorite = (location: Location) => {
+    setFavoritePlaces((previous) => previous.some((place) => place.id === location.id)
+      ? previous.filter((place) => place.id !== location.id)
+      : [location, ...previous].slice(0, 8));
   };
   const toggleMode = (mode: TransportMode) => setModes((current) => current.includes(mode) ? current.filter((value) => value !== mode) : [...current, mode]);
   const calculateRoad = async () => {
@@ -431,8 +522,7 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
       );
       setRoute({ coordinates: data.geometry.coordinates, distance: data.distance, duration: data.duration, source: data.source });
       setRouteMessage("Road route calculated from OSRM road geometry.");
-      const recent = JSON.parse(localStorage.getItem("logihelp-recent-routes") ?? "[]") as Array<Record<string, string>>;
-      localStorage.setItem("logihelp-recent-routes", JSON.stringify([{ source: source.label.split(",")[0], destination: destination.label.split(",")[0], mode: "Road", updatedAt: new Date().toISOString(), status: "Calculated" }, ...recent].slice(0, 20)));
+      saveRecentRoute(source.label.split(",")[0], destination.label.split(",")[0], "Road");
     } catch (error) { setRouteMessage(error instanceof Error ? error.message : "Could not calculate a road route."); }
     finally { setBusy(false); }
   };
@@ -453,6 +543,9 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
       setResults(data.routes);
       onCalculated(data.routes);
       setRouteMessage(data.explanation);
+      if (data.routes.length) {
+        saveRecentRoute(request.source, request.destination, data.routes[0].modes.map((mode) => modeLabels[mode]).join(" / "));
+      }
       if (!data.routes.length) setRoute(null);
       else setPage("Optimization workspace");
     } catch (error) { setRouteMessage(error instanceof Error ? error.message : "Optimization failed."); }
@@ -471,17 +564,21 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
           <div className="panel-heading"><div><h2>Shipment details</h2><p>Enter your origin, destination and requirements</p></div><span className="step-count">01 / 02</span></div>
           <div className="location-fields">
             <div className="location-field">
-              <label htmlFor="source">ORIGIN</label><div className="location-input-wrap"><span className="location-mark origin-mark" /><input id="source" placeholder="Search a city or address" value={sourceText} onChange={(event) => { setSourceText(event.target.value); setSource(null); }} onKeyDown={(event) => event.key === "Enter" && void searchLocation("source")} /><button className="search-field-button" onClick={() => void searchLocation("source")} aria-label="Search origin"><Search size={16} /></button></div>
+              <label htmlFor="source">ORIGIN</label><div className="location-input-wrap"><span className="location-mark origin-mark" /><input id="source" placeholder="Search a city or address" value={sourceText} onChange={(event) => { setSourceText(event.target.value); setSource(null); setAutocompleteTarget("source"); setSuggestionFor("source"); }} onFocus={() => setPlaceTarget("source")} onKeyDown={(event) => event.key === "Enter" && void searchLocation("source")} /><button className="search-field-button" onClick={() => void searchLocation("source")} aria-label="Search origin"><Search size={16} /></button></div>
               {searching === "source" && <div className="inline-hint">Searching OpenStreetMap…</div>}
-              {!!suggestions.length && suggestionFor === "source" && searching === null && <div className="suggestion-list">{suggestions.map((item) => <button key={item.id} onClick={() => chooseLocation("source", item)}><MapPin size={14} /><span>{item.label}</span></button>)}</div>}
+              {!!suggestions.length && suggestionFor === "source" && searching === null && <div className="suggestion-list">{suggestions.map((item) => <div className="suggestion-row" key={item.id}><button className="suggestion-place" onClick={() => chooseLocation("source", item)}><MapPin size={14} /><span>{item.label}</span></button><button className={`favorite-toggle ${favoritePlaces.some((place) => place.id === item.id) ? "is-favorite" : ""}`} onClick={() => toggleFavorite(item)} aria-label={favoritePlaces.some((place) => place.id === item.id) ? "Remove saved place" : "Save place"}><Star size={14} fill={favoritePlaces.some((place) => place.id === item.id) ? "currentColor" : "none"} /></button></div>)}</div>}
             </div>
             <button className="swap-locations" onClick={swap} aria-label="Swap origin and destination"><ArrowDownUp size={15} /></button>
             <div className="location-field">
-              <label htmlFor="destination">DESTINATION</label><div className="location-input-wrap"><span className="location-mark destination-mark" /><input id="destination" placeholder="Search a city or address" value={destinationText} onChange={(event) => { setDestinationText(event.target.value); setDestination(null); }} onKeyDown={(event) => event.key === "Enter" && void searchLocation("destination")} /><button className="search-field-button" onClick={() => void searchLocation("destination")} aria-label="Search destination"><Search size={16} /></button></div>
+              <label htmlFor="destination">DESTINATION</label><div className="location-input-wrap"><span className="location-mark destination-mark" /><input id="destination" placeholder="Search a city or address" value={destinationText} onChange={(event) => { setDestinationText(event.target.value); setDestination(null); setAutocompleteTarget("destination"); setSuggestionFor("destination"); }} onFocus={() => setPlaceTarget("destination")} onKeyDown={(event) => event.key === "Enter" && void searchLocation("destination")} /><button className="search-field-button" onClick={() => void searchLocation("destination")} aria-label="Search destination"><Search size={16} /></button></div>
               {searching === "destination" && <div className="inline-hint">Searching OpenStreetMap…</div>}
-              {!!suggestions.length && suggestionFor === "destination" && searching === null && <div className="suggestion-list">{suggestions.map((item) => <button key={item.id} onClick={() => chooseLocation("destination", item)}><MapPin size={14} /><span>{item.label}</span></button>)}</div>}
+              {!!suggestions.length && suggestionFor === "destination" && searching === null && <div className="suggestion-list">{suggestions.map((item) => <div className="suggestion-row" key={item.id}><button className="suggestion-place" onClick={() => chooseLocation("destination", item)}><MapPin size={14} /><span>{item.label}</span></button><button className={`favorite-toggle ${favoritePlaces.some((place) => place.id === item.id) ? "is-favorite" : ""}`} onClick={() => toggleFavorite(item)} aria-label={favoritePlaces.some((place) => place.id === item.id) ? "Remove saved place" : "Save place"}><Star size={14} fill={favoritePlaces.some((place) => place.id === item.id) ? "currentColor" : "none"} /></button></div>)}</div>}
             </div>
           </div>
+          {(recentPlaces.length > 0 || favoritePlaces.length > 0) && <div className="saved-places">
+            <div className="saved-places-heading"><span><Star size={13} />Saved places</span><div><button className={placeTarget === "source" ? "active" : ""} onClick={() => setPlaceTarget("source")}>Use as origin</button><button className={placeTarget === "destination" ? "active" : ""} onClick={() => setPlaceTarget("destination")}>Use as destination</button></div></div>
+            <div className="saved-place-chips">{[...favoritePlaces, ...recentPlaces.filter((place) => !favoritePlaces.some((saved) => saved.id === place.id))].slice(0, 8).map((place) => <button key={`${place.id}-${place.label}`} onClick={() => chooseLocation(placeTarget, place)} title={`${place.label} · click to use as ${placeTarget}`}><MapPin size={12} />{place.label.split(",")[0]}{favoritePlaces.some((saved) => saved.id === place.id) && <Star size={11} fill="currentColor" />}</button>)}</div>
+          </div>}
           <div className="form-divider" />
           <div className="form-two-col">
             <label className="form-field"><span>CARGO WEIGHT <small>TONNES</small></span><input type="number" min="0.1" step="0.1" value={cargoWeight} onChange={(event) => setCargoWeight(Number(event.target.value))} /></label>
@@ -744,9 +841,30 @@ function OptimizationWorkspace({ connections, results, setPage }: { connections:
 function RouteComparison({ results, connections, setPage }: { results: RouteResult[]; connections: Connection[]; setPage: (page: Page) => void }) {
   const [selected, setSelected] = useState(0);
   const names = new Map(connections.map((connection) => [connection.id, connection]));
+  const exportComparison = () => {
+    const header = ["rank", "origin", "destination", "cost_inr", "distance_km", "time_hours", "modes", "transfers", "weighted_score"];
+    const rows = results.map((item, index) => [
+      index + 1,
+      item.stops[0],
+      item.stops[item.stops.length - 1],
+      item.cost,
+      item.distanceKm,
+      item.timeHours,
+      item.modes.join("|"),
+      Math.max(0, item.stops.length - 2),
+      item.score,
+    ]);
+    const quote = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+    const blob = new Blob([[header, ...rows].map((row) => row.map(quote).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "logihelp-route-comparison.csv";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
   return (
     <>
-      <PageTitle eyebrow="DECISION SUPPORT" title="Route comparison" description="Compare feasible alternatives side by side using consistent cost, time and distance measures." action={<button className="button button-secondary" onClick={() => setPage("Route planner")}><Plus size={15} />New comparison</button>} />
+      <PageTitle eyebrow="DECISION SUPPORT" title="Route comparison" description="Compare feasible alternatives side by side using consistent cost, time and distance measures." action={<><button className="button button-secondary" onClick={() => setPage("Route planner")}><Plus size={15} />New comparison</button><button className="button button-secondary" onClick={exportComparison} disabled={!results.length}><Download size={15} />Export CSV</button></>} />
       {!results.length ? <section className="panel workspace-empty"><div className="empty-icon"><ArrowDownUp size={20} /></div><h2>No alternatives to compare</h2><p>Run an optimization to generate capacity-checked route alternatives from your connection data.</p><button className="button button-primary" onClick={() => setPage("Route planner")}>Plan a route <ArrowRight size={15} /></button></section> :
         <section className="panel comparison-panel"><div className="panel-heading"><div><h2>Alternative routes</h2><p>Ranked by your selected cost, time and distance priorities</p></div><span className="tag tag-green">{results.length} FEASIBLE ROUTES</span></div>
           <div className="comparison-table-wrap"><table className="comparison-table"><thead><tr><th>MEASURE</th>{results.map((item, index) => <th key={item.connectionIds.join("-")}><button className={`comparison-select ${selected === index ? "selected" : ""}`} onClick={() => setSelected(index)}>{index === 0 ? "PREFERRED" : `OPTION ${index + 1}`}<span>{item.stops[0]} → {item.stops[item.stops.length - 1]}</span></button></th>)}</tr></thead><tbody>

@@ -4,7 +4,7 @@ import express from "express";
 import type { InfrastructureFeature, InfrastructureResponse, TransportMode } from "../shared/types";
 import { optimizeFlow, optimizeRoutes } from "./algorithms";
 
-const app = express();
+export const app = express();
 const port = Number(process.env.PORT ?? 3001);
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -22,23 +22,56 @@ app.get("/api/geocode", async (req, res) => {
     return;
   }
   try {
+    const base = (process.env.NOMINATIM_URL ?? "https://nominatim.openstreetmap.org").replace(/\/$/, "");
     const requestAt = Math.max(Date.now(), nextGeocodeAt);
     nextGeocodeAt = requestAt + 1000;
     await new Promise((resolve) => setTimeout(resolve, requestAt - Date.now()));
-    const base = (process.env.NOMINATIM_URL ?? "https://nominatim.openstreetmap.org").replace(/\/$/, "");
-    const response = await fetch(`${base}/search?format=jsonv2&limit=5&countrycodes=in&q=${encodeURIComponent(query)}`, {
-      headers: { "User-Agent": "LogiHelp/1.0 (transport planning prototype)" },
-      signal: AbortSignal.timeout(12000),
+    let nominatimStatus = "unavailable";
+    try {
+      const nominatimResponse = await fetch(`${base}/search?format=jsonv2&limit=5&countrycodes=in&q=${encodeURIComponent(query)}`, {
+        headers: { "User-Agent": "LogiHelp/1.0 (transport planning prototype)" },
+        signal: AbortSignal.timeout(8000),
+      });
+      nominatimStatus = String(nominatimResponse.status);
+      if (nominatimResponse.ok) {
+        const results = await nominatimResponse.json() as Array<{ place_id: number; display_name: string; lat: string; lon: string; type: string }>;
+        if (results.length) {
+          res.json(results.map((result) => ({
+            id: result.place_id,
+            label: result.display_name,
+            lat: Number(result.lat),
+            lon: Number(result.lon),
+            type: result.type,
+          })));
+          return;
+        }
+      }
+    } catch { /* Continue to the secondary geocoder. */ }
+
+    const photonUrl = new URL(process.env.PHOTON_URL ?? "https://photon.komoot.io/api/");
+    photonUrl.searchParams.set("q", query);
+    photonUrl.searchParams.set("limit", "5");
+    photonUrl.searchParams.set("lang", "en");
+    photonUrl.searchParams.set("bbox", "68.1,6.5,97.4,35.5");
+    const photonResponse = await fetch(photonUrl, { signal: AbortSignal.timeout(10000) });
+    if (!photonResponse.ok) throw new Error(`Location providers returned ${nominatimStatus} and ${photonResponse.status}.`);
+    const photonData = await photonResponse.json() as {
+      features?: Array<{
+        geometry?: { coordinates?: [number, number] };
+        properties?: Record<string, string | number | undefined>;
+      }>;
+    };
+    const results = (photonData.features ?? []).flatMap((feature, index) => {
+      const coordinates = feature.geometry?.coordinates;
+      const properties = feature.properties;
+      if (!coordinates || !properties) return [];
+      const label = [properties.name, properties.city, properties.state, properties.country]
+        .filter((part, partIndex, parts) => part && parts.indexOf(part) === partIndex)
+        .join(", ");
+      if (!label || String(properties.country ?? "").toLowerCase() !== "india") return [];
+      return [{ id: `photon-${String(properties.osm_id ?? index)}`, label, lon: coordinates[0], lat: coordinates[1], type: String(properties.osm_value ?? "place") }];
     });
-    if (!response.ok) throw new Error(`Geocoding provider returned ${response.status}.`);
-    const results = await response.json() as Array<{ place_id: number; display_name: string; lat: string; lon: string; type: string }>;
-    res.json(results.map((result) => ({
-      id: result.place_id,
-      label: result.display_name,
-      lat: Number(result.lat),
-      lon: Number(result.lon),
-      type: result.type,
-    })));
+    res.json(results);
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "Geocoding service unavailable." });
   }
@@ -195,6 +228,8 @@ app.post("/api/min-cost-flow", (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`LogiHelp API listening on http://localhost:${port}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`LogiHelp API listening on http://localhost:${port}`);
+  });
+}
