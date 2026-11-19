@@ -17,9 +17,15 @@ import type {
   RouteResult, TransportMode,
 } from "../shared/types";
 
-type Page = "Overview" | "Infrastructure map" | "Route planner" | "Data manager" | "Optimization workspace" | "Route comparison" | "Reports & analytics";
+type Page = "Overview" | "Infrastructure map" | "Route planner" | "Data manager" | "Optimization workspace" | "Route comparison" | "Reports & analytics" | "Settings";
 type Location = { id: number | string; label: string; lat: number; lon: number; type: string };
 type RouteGeometry = { coordinates: [number, number][]; distance: number; duration: number; source: string };
+type PlannerPreferences = {
+  cargoWeight: number;
+  cargoType: CargoType;
+  metric: OptimizationMetric;
+  modes: TransportMode[];
+};
 
 const navigation: { name: Page; icon: typeof MapIcon }[] = [
   { name: "Overview", icon: Gauge },
@@ -34,6 +40,13 @@ const modeLabels: Record<TransportMode, string> = { road: "Road", rail: "Rail", 
 const modeColors: Record<TransportMode, string> = { road: "#3d78c5", rail: "#df9a36", air: "#8b68c1", sea: "#28a0a0" };
 const cityMapCenter: [number, number] = [22.9, 79.2];
 const storageKey = "logihelp-connections-v1";
+const plannerPreferencesKey = "logihelp-planner-preferences-v1";
+const defaultPlannerPreferences: PlannerPreferences = {
+  cargoWeight: 10,
+  cargoType: "general",
+  metric: "cost",
+  modes: ["road", "rail", "air", "sea"],
+};
 const tileUrl = import.meta.env.VITE_TILE_URL || "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 const tileAttribution = import.meta.env.VITE_TILE_ATTRIBUTION || '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
@@ -121,6 +134,28 @@ function readSavedLocations(key: string): Location[] {
     ) : [];
   } catch {
     return [];
+  }
+}
+
+function readPlannerPreferences(): PlannerPreferences {
+  try {
+    const saved = JSON.parse(localStorage.getItem(plannerPreferencesKey) ?? "{}") as Partial<PlannerPreferences>;
+    const cargoTypes: CargoType[] = ["general", "perishable", "hazardous", "oversized", "bulk"];
+    const metrics: OptimizationMetric[] = ["cost", "distance", "time"];
+    const validModes = Array.isArray(saved.modes)
+      ? saved.modes.filter((mode): mode is TransportMode => ["road", "rail", "air", "sea"].includes(mode))
+      : defaultPlannerPreferences.modes;
+    const cargoWeight = saved.cargoWeight;
+    return {
+      cargoWeight: typeof cargoWeight === "number" && Number.isFinite(cargoWeight) && cargoWeight > 0
+        ? cargoWeight
+        : defaultPlannerPreferences.cargoWeight,
+      cargoType: cargoTypes.includes(saved.cargoType as CargoType) ? saved.cargoType! : defaultPlannerPreferences.cargoType,
+      metric: metrics.includes(saved.metric as OptimizationMetric) ? saved.metric! : defaultPlannerPreferences.metric,
+      modes: validModes.length ? validModes : defaultPlannerPreferences.modes,
+    };
+  } catch {
+    return defaultPlannerPreferences;
   }
 }
 
@@ -333,7 +368,7 @@ function Sidebar({ page, setPage, open, onClose }: { page: Page; setPage: (page:
         </nav>
         <div className="sidebar-bottom">
           <div className="source-card"><div className="source-card-top"><span className="source-badge"><Layers3 size={14} /></span><span>DATA SOURCES</span><span className="source-live-dot" /></div><strong>OpenStreetMap</strong><small>Regional map queries · on demand</small></div>
-          <button className="nav-item settings-item"><Settings2 size={17} /><span>Settings</span></button>
+          <button onClick={() => { setPage("Settings"); onClose(); }} className={`nav-item settings-item ${page === "Settings" ? "selected" : ""}`}><Settings2 size={17} /><span>Settings</span></button>
           <div className="sidebar-footnote">LogiHelp <span>v1.0.0</span><br />Transport planning platform</div>
         </div>
       </aside>
@@ -428,6 +463,7 @@ function InfrastructurePage({ setPage, connections }: { setPage: (page: Page) =>
 }
 
 function RoutePlanner({ connections, setPage, onCalculated }: { connections: Connection[]; setPage: (page: Page) => void; onCalculated: (routes: RouteResult[]) => void }) {
+  const [plannerDefaults] = useState(readPlannerPreferences);
   const [sourceText, setSourceText] = useState("");
   const [destinationText, setDestinationText] = useState("");
   const [source, setSource] = useState<Location | null>(null);
@@ -439,12 +475,12 @@ function RoutePlanner({ connections, setPage, onCalculated }: { connections: Con
   const [placeTarget, setPlaceTarget] = useState<"source" | "destination">("source");
   const [recentPlaces, setRecentPlaces] = useState<Location[]>(() => readSavedLocations("logihelp-recent-places"));
   const [favoritePlaces, setFavoritePlaces] = useState<Location[]>(() => readSavedLocations("logihelp-favorite-places"));
-  const [cargoWeight, setCargoWeight] = useState(10);
-  const [cargoType, setCargoType] = useState<RouteRequest["cargoType"]>("general");
+  const [cargoWeight, setCargoWeight] = useState(plannerDefaults.cargoWeight);
+  const [cargoType, setCargoType] = useState<RouteRequest["cargoType"]>(plannerDefaults.cargoType);
   const [maxBudget, setMaxBudget] = useState("");
   const [maxHours, setMaxHours] = useState("");
-  const [metric, setMetric] = useState<OptimizationMetric>("cost");
-  const [modes, setModes] = useState<TransportMode[]>(["road", "rail", "air", "sea"]);
+  const [metric, setMetric] = useState<OptimizationMetric>(plannerDefaults.metric);
+  const [modes, setModes] = useState<TransportMode[]>(plannerDefaults.modes);
   const [priorities, setPriorities] = useState({ cost: 50, time: 30, distance: 20 });
   const [route, setRoute] = useState<RouteGeometry | null>(null);
   const [results, setResults] = useState<RouteResult[]>([]);
@@ -903,6 +939,88 @@ function Reports({ connections }: { connections: Connection[] }) {
   );
 }
 
+function SettingsPage({ setPage }: { setPage: (page: Page) => void }) {
+  const [preferences, setPreferences] = useState(readPlannerPreferences);
+  const [notice, setNotice] = useState("");
+  const [apiStatus, setApiStatus] = useState<"idle" | "checking" | "online" | "error">("idle");
+  const [apiMessage, setApiMessage] = useState("");
+  const toggleMode = (mode: TransportMode) => {
+    setPreferences((current) => {
+      const modes = current.modes.includes(mode)
+        ? current.modes.filter((item) => item !== mode)
+        : [...current.modes, mode];
+      return { ...current, modes };
+    });
+  };
+  const save = () => {
+    if (!Number.isFinite(preferences.cargoWeight) || preferences.cargoWeight <= 0) {
+      setNotice("Default shipment weight must be greater than zero.");
+      return;
+    }
+    if (!preferences.modes.length) {
+      setNotice("Select at least one default transport mode.");
+      return;
+    }
+    localStorage.setItem(plannerPreferencesKey, JSON.stringify(preferences));
+    setNotice("Planner defaults saved in this browser.");
+  };
+  const reset = () => {
+    localStorage.removeItem(plannerPreferencesKey);
+    setPreferences(defaultPlannerPreferences);
+    setNotice("Planner defaults restored.");
+  };
+  const clearSavedPlaces = () => {
+    if (!window.confirm("Clear saved and recent places from this browser?")) return;
+    localStorage.removeItem("logihelp-recent-places");
+    localStorage.removeItem("logihelp-favorite-places");
+    setNotice("Saved and recent places cleared.");
+  };
+  const checkApi = async () => {
+    setApiStatus("checking");
+    setApiMessage("");
+    try {
+      const result = await requestJson<{ status: string; service: string }>("/api/health");
+      setApiStatus("online");
+      setApiMessage(`${result.service} is responding.`);
+    } catch (error) {
+      setApiStatus("error");
+      setApiMessage(error instanceof Error ? error.message : "API health check failed.");
+    }
+  };
+  return (
+    <>
+      <PageTitle eyebrow="WORKSPACE PREFERENCES" title="Settings" description="Configure route-planning defaults and check the deployed API connection." />
+      <div className="settings-grid">
+        <section className="panel settings-panel">
+          <div className="panel-heading"><div><h2>Route-planner defaults</h2><p>Applied when you open a new route-planning session.</p></div><span className="tag tag-blue">THIS BROWSER</span></div>
+          <div className="settings-fields">
+            <label className="form-field"><span>DEFAULT SHIPMENT WEIGHT <small>TONNES</small></span><input type="number" min="0.1" step="0.1" value={preferences.cargoWeight} onChange={(event) => setPreferences({ ...preferences, cargoWeight: Number(event.target.value) })} /></label>
+            <label className="form-field"><span>DEFAULT CARGO TYPE</span><select value={preferences.cargoType} onChange={(event) => setPreferences({ ...preferences, cargoType: event.target.value as CargoType })}><option value="general">General</option><option value="perishable">Perishable</option><option value="hazardous">Hazardous</option><option value="oversized">Oversized</option><option value="bulk">Bulk</option></select></label>
+            <label className="form-field settings-full"><span>DEFAULT OPTIMIZATION GOAL</span><select value={preferences.metric} onChange={(event) => setPreferences({ ...preferences, metric: event.target.value as OptimizationMetric })}><option value="cost">Lowest cost</option><option value="distance">Shortest distance</option><option value="time">Fastest delivery</option></select></label>
+          </div>
+          <div className="settings-mode-section"><div className="form-section-label">DEFAULT AVAILABLE MODES</div><div className="settings-mode-list">{(["road", "rail", "air", "sea"] as const).map((mode) => <label key={mode} className="settings-mode"><input type="checkbox" checked={preferences.modes.includes(mode)} onChange={() => toggleMode(mode)} /><span className="legend-dot" style={{ backgroundColor: modeColors[mode] }} />{modeLabels[mode]}</label>)}</div></div>
+          {notice && <div className="result-message">{notice}</div>}
+          <div className="settings-actions"><button className="text-button" onClick={reset}>Restore defaults</button><button className="button button-primary" onClick={save}><Check size={14} />Save preferences</button></div>
+        </section>
+        <div className="settings-side">
+          <section className="panel api-status-panel">
+            <div className="panel-heading"><div><h2>Deployment health</h2><p>Check that Vercel can invoke the LogiHelp API.</p></div><span className={`api-health-indicator ${apiStatus}`} /></div>
+            <div className="api-status-content"><div className={`api-status-icon ${apiStatus}`}><Activity size={18} /></div><div><strong>{apiStatus === "checking" ? "Checking connection…" : apiStatus === "online" ? "API reachable" : apiStatus === "error" ? "API check failed" : "Not checked yet"}</strong><p>{apiMessage || "Runs a live request to /api/health from this deployment."}</p></div></div>
+            <div className="api-status-actions"><button className="button button-secondary" onClick={() => void checkApi()} disabled={apiStatus === "checking"}>{apiStatus === "checking" ? "Checking…" : "Check API connection"}</button></div>
+          </section>
+          <section className="panel settings-data-panel">
+            <div className="panel-heading"><div><h2>Data & providers</h2><p>Current workspace storage and sources</p></div></div>
+            <div className="settings-provider-row"><span className="provider-icon"><MapIcon size={16} /></span><div><strong>OpenStreetMap</strong><small>Regional map features · on demand</small></div><span className="tag tag-neutral">MAP DATA</span></div>
+            <div className="settings-provider-row"><span className="provider-icon"><Navigation size={16} /></span><div><strong>OSRM + geocoding</strong><small>Road routes and India place search</small></div><span className="tag tag-neutral">ON DEMAND</span></div>
+            <div className="settings-storage-note"><Database size={14} /><span>Manual connections and planner preferences are stored in this browser; they are not shared across accounts or devices.</span></div>
+            <div className="settings-actions"><button className="button button-secondary" onClick={() => setPage("Data manager")}>Open data manager <ArrowRight size={14} /></button><button className="text-button danger-text-button" onClick={clearSavedPlaces}>Clear saved places</button></div>
+          </section>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("Overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -915,7 +1033,8 @@ export default function App() {
         page === "Data manager" ? <DataManager connections={connections} setConnections={setConnections} /> :
           page === "Optimization workspace" ? <OptimizationWorkspace connections={connections} results={routeResults} setPage={setPage} /> :
             page === "Route comparison" ? <RouteComparison results={routeResults} connections={connections} setPage={setPage} /> :
-              <Reports connections={connections} />;
+              page === "Reports & analytics" ? <Reports connections={connections} /> :
+                <SettingsPage setPage={setPage} />;
   return (
     <div className="app-shell">
       <Sidebar page={page} setPage={setPage} open={sidebarOpen} onClose={closeSidebar} />
