@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { InfrastructureFeature, InfrastructureResponse, TransportMode } from "../shared/types";
-import { optimizeFlow, optimizeRoutes } from "./algorithms";
-import { geocode } from "./geocoding";
+import { optimizeFlow, optimizeRoutes } from "./algorithms.js";
+import { geocode } from "./geocoding.js";
 
 type RequestWithBody = IncomingMessage & { body?: unknown };
 const infrastructureCache = new Map<string, { expiresAt: number; body: InfrastructureResponse }>();
